@@ -1,0 +1,7 @@
+{
+  "dataset_path": "/Users/joshua/Documents/GitHub/scripture-translation/data/processed/bible_john_es.jsonl",
+  "adapter_name": "bible_adapter",
+  "job_id": "mock-job:bible_adapter",
+  "status": "completed",
+  "adapter_path": "/Users/joshua/Documents/GitHub/scripture-translation/models/adapters/bible_adapter"
+}

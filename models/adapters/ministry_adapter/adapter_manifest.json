@@ -1,0 +1,6 @@
+{
+  "adapter_name": "ministry_adapter",
+  "mode": "ministry",
+  "backend": "mock",
+  "status": "seed"
+}

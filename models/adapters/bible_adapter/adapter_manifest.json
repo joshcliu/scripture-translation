@@ -1,0 +1,7 @@
+{
+  "adapter_name": "bible_adapter",
+  "mode": "bible",
+  "job_id": "mock-job:bible_adapter",
+  "backend": "mock",
+  "status": "ready"
+}

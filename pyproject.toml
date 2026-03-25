@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scripture-translation"
+version = "0.1.0"
+description = "Recovery Version and LSM translation MVP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+inference = [
+  "torch>=2.2.0",
+  "transformers>=4.38.0",
+  "peft>=0.9.0"
+]
+pdf = [
+  "pymupdf>=1.23.0",
+  "pdfplumber>=0.10.0"
+]
+
+[project.scripts]
+translate = "project.cli:main"
+prepare-translation-data = "project.prepare_data_cli:main"

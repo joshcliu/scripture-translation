@@ -1,0 +1,23 @@
+[
+  {
+    "id": "john_1_1",
+    "book": "John",
+    "chapter": 1,
+    "verse": 1,
+    "text": "In the beginning was the Word, and the Word was with God, and the Word was God."
+  },
+  {
+    "id": "john_1_2",
+    "book": "John",
+    "chapter": 1,
+    "verse": 2,
+    "text": "He was in the beginning with God."
+  },
+  {
+    "id": "john_1_3",
+    "book": "John",
+    "chapter": 1,
+    "verse": 3,
+    "text": "All things came into being through Him, and apart from Him not one thing came into being which has come into being."
+  }
+]

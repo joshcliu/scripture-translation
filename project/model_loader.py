@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from .config import get_adapter_path, load_config
+
+
+WORD_BOUNDARY = re.compile(r"(\W+)")
+
+
+class TranslationBackend:
+    def generate(self, prompt: str, source_text: str, target_lang: str) -> str:
+        raise NotImplementedError
+
+
+@dataclass
+class LoadedModel:
+    mode: str
+    backend_name: str
+    base_model_name: str
+    adapter_path: Path
+    backend: TranslationBackend
+
+    def translate(self, prompt: str, source_text: str, target_lang: str) -> str:
+        return self.backend.generate(prompt=prompt, source_text=source_text, target_lang=target_lang)
+
+
+class MockTranslationBackend(TranslationBackend):
+    COMMON_PHRASES = {
+        "In the beginning was the Word, and the Word was with God, and the Word was God.": "En el principio era la Palabra, y la Palabra estaba con Dios, y la Palabra era Dios.",
+        "He was in the beginning with God.": "Este estaba en el principio con Dios.",
+        "All things came into being through Him, and apart from Him not one thing came into being which has come into being.": "Todas las cosas llegaron a existir por medio de Él, y sin Él ni una sola cosa llegó a existir de lo que ha llegado a existir.",
+        "In the beginning was the Word": "En el principio era la Palabra",
+        "God's economy is to dispense Himself into His chosen people.": "La economía de Dios consiste en impartirse a Sus escogidos.",
+        "The spirit gives life, and the church expresses Christ in a living way.": "El espíritu da vida, y la iglesia expresa a Cristo de una manera viviente.",
+        "in the beginning": "en el principio",
+        "the word": "la Palabra",
+        "with God": "con Dios",
+        "was God": "era Dios",
+        "all things": "todas las cosas",
+        "came into being": "llegaron a existir",
+        "through him": "por medio de Él",
+        "without him": "sin Él",
+        "not even one thing": "ni una sola cosa",
+        "that has come into being": "que ha llegado a existir",
+        "life": "vida",
+        "light": "luz",
+        "men": "los hombres",
+        "God's economy": "economía de Dios",
+        "economy of God": "economía de Dios",
+        "chosen people": "pueblo escogido",
+        "dispense": "impartir",
+        "dispensing": "impartición",
+        "spirit": "espíritu",
+        "soul": "alma",
+        "church": "iglesia",
+    }
+    COMMON_WORDS = {
+        "and": "y",
+        "the": "el",
+        "was": "era",
+        "is": "es",
+        "of": "de",
+        "to": "a",
+        "into": "en",
+        "his": "su",
+        "himself": "sí mismo",
+        "god": "Dios",
+        "word": "Palabra",
+        "people": "pueblo",
+        "beginning": "principio",
+        "through": "por medio de",
+        "without": "sin",
+    }
+    MINISTRY_STYLE_REWRITES = {
+        "En el principio": "Al principio",
+        "era la Palabra": "estaba la Palabra",
+        "es impartir": "consiste en impartir",
+        "su pueblo escogido": "sus escogidos",
+        "Sí mismo": "sí mismo",
+    }
+
+    def __init__(self, mode: str):
+        self.mode = mode
+
+    def generate(self, prompt: str, source_text: str, target_lang: str) -> str:
+        if target_lang.lower() != "es":
+            raise ValueError("The MVP currently supports Spanish ('es') only.")
+        translated = self._translate_phrases(source_text)
+        translated = self._translate_words(translated)
+        translated = self._cleanup(translated)
+        if self.mode == "ministry":
+            for source, target in self.MINISTRY_STYLE_REWRITES.items():
+                translated = translated.replace(source, target)
+        return translated
+
+    def _translate_phrases(self, text: str) -> str:
+        translated = text
+        for source, target in sorted(self.COMMON_PHRASES.items(), key=lambda item: len(item[0]), reverse=True):
+            translated = re.sub(re.escape(source), target, translated, flags=re.IGNORECASE)
+        return translated
+
+    def _translate_words(self, text: str) -> str:
+        tokens = WORD_BOUNDARY.split(text)
+        converted: list[str] = []
+        for token in tokens:
+            lowered = token.lower()
+            replacement = self.COMMON_WORDS.get(lowered)
+            if replacement is None:
+                converted.append(token)
+                continue
+            if token.isupper():
+                converted.append(replacement.upper())
+            elif token[:1].isupper():
+                converted.append(replacement[:1].upper() + replacement[1:])
+            else:
+                converted.append(replacement)
+        return "".join(converted)
+
+    def _cleanup(self, text: str) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+        text = re.sub(r"\bla Palabra\b", "la Palabra", text)
+        if self.mode == "bible":
+            text = text.replace("Al principio", "En el principio")
+            text = text.replace("estaba la Palabra", "era la Palabra")
+        if text and text[0].islower():
+            text = text[0].upper() + text[1:]
+        return text
+
+
+class HuggingFaceTranslationBackend(TranslationBackend):
+    def __init__(self, mode: str, adapter_path: Path, base_model_name: str):
+        try:
+            import torch
+            from peft import PeftModel
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError("transformers, peft, and torch are required for real model loading") from exc
+
+        self.mode = mode
+        self._torch = torch
+        self._tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto",
+        )
+        self._model = PeftModel.from_pretrained(base_model, str(adapter_path))
+
+    def generate(self, prompt: str, source_text: str, target_lang: str) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        tokenizer = self._tokenizer
+        model = self._model
+        rendered_prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = tokenizer(rendered_prompt, return_tensors="pt")
+        if hasattr(model, "device"):
+            inputs = {key: value.to(model.device) for key, value in inputs.items()}
+        with self._torch.no_grad():
+            output_tokens = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                do_sample=False,
+                temperature=0.0,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        decoded = tokenizer.decode(output_tokens[0][inputs["input_ids"].shape[-1] :], skip_special_tokens=True)
+        return decoded.strip()
+
+
+def _has_real_adapter_weights(adapter_path: Path) -> bool:
+    return (adapter_path / "adapter_config.json").exists() and (adapter_path / "adapter_model.safetensors").exists()
+
+
+def _load_manifest(adapter_path: Path) -> dict[str, object]:
+    manifest_path = adapter_path / "adapter_manifest.json"
+    if not manifest_path.exists():
+        return {}
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+@lru_cache(maxsize=2)
+def load_model(mode: str) -> LoadedModel:
+    config = load_config()
+    adapter_path = get_adapter_path(mode)
+    adapter_path.mkdir(parents=True, exist_ok=True)
+
+    if _has_real_adapter_weights(adapter_path):
+        backend: TranslationBackend = HuggingFaceTranslationBackend(
+            mode=mode,
+            adapter_path=adapter_path,
+            base_model_name=config.base_model_name,
+        )
+        backend_name = "huggingface+peft"
+    else:
+        manifest = _load_manifest(adapter_path)
+        backend = MockTranslationBackend(mode=manifest.get("mode", mode))
+        backend_name = "mock"
+
+    return LoadedModel(
+        mode=mode,
+        backend_name=backend_name,
+        base_model_name=config.base_model_name,
+        adapter_path=adapter_path,
+        backend=backend,
+    )

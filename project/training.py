@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import base64
 import json
-import time
+import os
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib import error, request
+from urllib import request
 
-from .config import MODE_TO_ADAPTER, REPO_ROOT, get_adapter_path, get_tinker_credentials, load_config
+from .config import MODE_TO_ADAPTER, REPO_ROOT, get_adapter_path, get_tinker_api_key, load_config
 
 
 TRAIN_DIR = REPO_ROOT / "train"
@@ -25,45 +26,72 @@ class TrainingJob:
 class TinkerClient:
     def __init__(self) -> None:
         self.config = load_config()
-        self.base_url, self.token = get_tinker_credentials()
+        self.api_key = get_tinker_api_key()
+        self._tinker: Any | None = None
+        self._service_client: Any | None = None
+
+        if self.api_key:
+            os.environ.setdefault(self.config.tinker.api_key_env, self.api_key)
+            try:
+                import tinker  # type: ignore
+            except ImportError:
+                self._tinker = None
+            else:
+                self._tinker = tinker
+                self._service_client = tinker.ServiceClient()
 
     @property
     def is_mock(self) -> bool:
-        return not self.base_url or not self.token
+        return not self.api_key or self._tinker is None
 
-    def upload_dataset(self, dataset_path: str | Path) -> str:
+    def upload_dataset(self, dataset_path: str | Path) -> list[dict[str, str]] | str:
         dataset_path = Path(dataset_path)
         if self.is_mock:
             return f"mock-dataset:{dataset_path.resolve()}"
-        payload = {
-            "filename": dataset_path.name,
-            "content_base64": base64.b64encode(dataset_path.read_bytes()).decode("ascii"),
-        }
-        response = self._request_json(
-            path=self.config.tinker.dataset_upload_path,
-            payload=payload,
-        )
-        return str(response["dataset_id"])
+        return _load_examples(dataset_path)
 
-    def trigger_fine_tuning_job(self, dataset_id: str, adapter_name: str) -> str:
+    def trigger_fine_tuning_job(self, dataset_id: list[dict[str, str]] | str, adapter_name: str) -> str:
         if self.is_mock:
             return f"mock-job:{adapter_name}"
-        payload = {
-            "dataset_id": dataset_id,
-            "base_model": self.config.base_model_name,
-            "adapter_name": adapter_name,
-        }
-        response = self._request_json(
-            path=self.config.tinker.job_create_path,
-            payload=payload,
+        assert isinstance(dataset_id, list)
+        assert self._service_client is not None
+        assert self._tinker is not None
+
+        self._ensure_supported_base_model()
+        training_client = self._service_client.create_lora_training_client(
+            base_model=self.config.base_model_name,
+            rank=self.config.tinker.lora_rank,
+            user_metadata={"adapter_name": adapter_name, "mode": _mode_from_adapter_name(adapter_name)},
         )
-        return str(response["job_id"])
+        tokenizer = training_client.get_tokenizer()
+        data = [_example_to_datum(example, tokenizer, self._tinker) for example in dataset_id]
+        adam_params = self._tinker.types.AdamParams(learning_rate=self.config.tinker.learning_rate)
+
+        for _ in range(self.config.tinker.epochs):
+            for batch in _batch(data, self.config.tinker.batch_size):
+                fwdbwd_future = training_client.forward_backward(batch, "cross_entropy")
+                optim_future = training_client.optim_step(adam_params)
+                fwdbwd_future.result()
+                optim_future.result()
+
+        info = training_client.get_info()
+        checkpoint_name = f"{adapter_name}_{self.config.tinker.checkpoint_name}"
+        save_result = training_client.save_weights_for_sampler(checkpoint_name).result()
+
+        job_id = _extract_job_id(info=info, fallback=save_result.path)
+        self._write_training_metadata(job_id=job_id, checkpoint_path=save_result.path)
+        return job_id
 
     def get_job_status(self, job_id: str) -> dict[str, Any]:
         if self.is_mock:
             return {"job_id": job_id, "status": "completed"}
-        path = self.config.tinker.job_status_path_template.format(job_id=job_id)
-        return self._request_json(path=path, payload=None, method="GET")
+        metadata_path = TRAIN_DIR / f"{job_id}.json"
+        if metadata_path.exists():
+            with metadata_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            payload["status"] = "completed"
+            return payload
+        return {"job_id": job_id, "status": "completed"}
 
     def download_lora_adapter(self, job_id: str, adapter_name: str) -> Path:
         adapter_path = get_adapter_path(_mode_from_adapter_name(adapter_name))
@@ -82,46 +110,67 @@ class TinkerClient:
                 json.dump(manifest, handle, ensure_ascii=False, indent=2)
             return adapter_path
 
-        status_payload = self.get_job_status(job_id)
-        download_url = status_payload[self.config.tinker.download_url_field]
-        request.urlretrieve(download_url, adapter_path / "adapter_bundle.bin")
+        assert self._service_client is not None
+        metadata = self.get_job_status(job_id)
+        checkpoint_path = metadata["checkpoint_path"]
+        rest_client = self._service_client.create_rest_client()
+        checkpoint_response = rest_client.get_checkpoint_archive_url_from_tinker_path(checkpoint_path).result()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "adapter.tar"
+            request.urlretrieve(checkpoint_response.url, archive_path)
+            with tarfile.open(archive_path, "r:*") as archive:
+                archive.extractall(adapter_path)
+
         manifest_path = adapter_path / "adapter_manifest.json"
         with manifest_path.open("w", encoding="utf-8") as handle:
-            json.dump(status_payload, handle, ensure_ascii=False, indent=2)
+            json.dump(
+                {
+                    "adapter_name": adapter_name,
+                    "mode": _mode_from_adapter_name(adapter_name),
+                    "job_id": job_id,
+                    "backend": "tinker",
+                    "status": "ready",
+                    "checkpoint_path": checkpoint_path,
+                },
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
         return adapter_path
 
-    def _request_json(self, path: str, payload: dict[str, Any] | None, method: str = "POST") -> dict[str, Any]:
-        assert self.base_url is not None
-        assert self.token is not None
-        url = f"{self.base_url.rstrip('/')}{path}"
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-        data = None if payload is None else json.dumps(payload).encode("utf-8")
-        req = request.Request(url=url, data=data, headers=headers, method=method)
-        try:
-            with request.urlopen(req, timeout=60) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Tinker API request failed ({exc.code}): {body}") from exc
+    def _ensure_supported_base_model(self) -> None:
+        assert self._service_client is not None
+        capabilities = self._service_client.get_server_capabilities()
+        supported = {item.model_name for item in capabilities.supported_models}
+        if self.config.base_model_name not in supported:
+            supported_preview = ", ".join(sorted(list(supported))[:10])
+            raise RuntimeError(
+                f"Configured base model '{self.config.base_model_name}' is not reported by Tinker. "
+                f"Update configs/runtime.json to a supported model or verify your Tinker account has access. "
+                f"Example supported models: {supported_preview}"
+            )
+
+    def _write_training_metadata(self, job_id: str, checkpoint_path: str) -> None:
+        TRAIN_DIR.mkdir(parents=True, exist_ok=True)
+        metadata_path = TRAIN_DIR / f"{job_id}.json"
+        with metadata_path.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "job_id": job_id,
+                    "checkpoint_path": checkpoint_path,
+                    "base_model_name": self.config.base_model_name,
+                },
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
 
 
 def train_adapter(dataset_path: str | Path, adapter_name: str) -> TrainingJob:
     client = TinkerClient()
     dataset_id = client.upload_dataset(dataset_path)
     job_id = client.trigger_fine_tuning_job(dataset_id=dataset_id, adapter_name=adapter_name)
-
-    if not client.is_mock:
-        while True:
-            status_payload = client.get_job_status(job_id)
-            status = str(status_payload.get("status", "")).lower()
-            if status in {"completed", "succeeded", "ready"}:
-                break
-            if status in {"failed", "cancelled", "error"}:
-                raise RuntimeError(f"Tinker fine-tuning job '{job_id}' failed with status '{status}'")
-            time.sleep(10)
 
     adapter_path = client.download_lora_adapter(job_id=job_id, adapter_name=adapter_name)
     status = "completed" if client.is_mock else str(client.get_job_status(job_id)["status"])
@@ -157,3 +206,64 @@ def _mode_from_adapter_name(adapter_name: str) -> str:
     raise ValueError(
         f"Unknown adapter '{adapter_name}'. Expected one of: {', '.join(sorted(MODE_TO_ADAPTER.values()))}"
     )
+
+
+def _load_examples(dataset_path: Path) -> list[dict[str, str]]:
+    examples: list[dict[str, str]] = []
+    with dataset_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            examples.append(
+                {
+                    "instruction": str(payload["instruction"]),
+                    "input": str(payload["input"]),
+                    "output": str(payload["output"]),
+                }
+            )
+    if not examples:
+        raise ValueError(f"No training examples found in {dataset_path}")
+    return examples
+
+
+def _render_prompt(example: dict[str, str]) -> str:
+    return (
+        f"Instruction:\n{example['instruction']}\n\n"
+        f"Input:\n{example['input']}\n\n"
+        "Output:"
+    )
+
+
+def _example_to_datum(example: dict[str, str], tokenizer: Any, tinker_module: Any) -> Any:
+    prompt = _render_prompt(example)
+    prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
+    completion_tokens = tokenizer.encode(f" {example['output']}\n", add_special_tokens=False)
+
+    tokens = prompt_tokens + completion_tokens
+    weights = [0] * len(prompt_tokens) + [1] * len(completion_tokens)
+    input_tokens = tokens[:-1]
+    target_tokens = tokens[1:]
+    shifted_weights = weights[1:]
+
+    return tinker_module.types.Datum(
+        model_input=tinker_module.types.ModelInput.from_ints(tokens=input_tokens),
+        loss_fn_inputs={
+            "target_tokens": target_tokens,
+            "weights": shifted_weights,
+        },
+    )
+
+
+def _batch(items: list[Any], batch_size: int) -> list[list[Any]]:
+    return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def _extract_job_id(info: Any, fallback: str) -> str:
+    model_data = getattr(info, "model_data", None)
+    if model_data is not None:
+        for attr in ("model_id", "training_run_id"):
+            value = getattr(model_data, attr, None)
+            if value:
+                return str(value)
+    return fallback.replace("tinker://", "").replace("/", "_")

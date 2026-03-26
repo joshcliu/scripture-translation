@@ -56,11 +56,20 @@ Run translation:
 Trigger adapter training:
 
 ```bash
+export TINKER_API_KEY=your_key_here
 python3 scripts/train_adapter.py --dataset-path data/processed/bible_john_es.jsonl --adapter-name bible_adapter
 python3 scripts/train_adapter.py --dataset-path data/processed/ministry_es.jsonl --adapter-name ministry_adapter
 ```
 
-If `TINKER_API_BASE_URL` and `TINKER_API_TOKEN` are unset, training runs in local mock mode and writes seed adapter manifests. When real LoRA files are placed into each adapter directory, inference switches to `transformers` + `peft` automatically.
+If `TINKER_API_KEY` is unset, or the `tinker` package is not installed, training runs in local mock mode and writes seed adapter manifests. With a real key, the trainer uses the official Tinker SDK, saves a sampler checkpoint, downloads the checkpoint archive, and extracts the LoRA files into the adapter directory.
+
+You can keep `TINKER_API_KEY` in a local `.env` file at the repo root. The project will load it automatically for local runs.
+
+Install the real training and inference dependencies with:
+
+```bash
+pip install -e '.[training,inference]'
+```
 
 ## Validation
 
@@ -74,3 +83,4 @@ python3 scripts/validate_mvp.py
 - Spanish is the only target language in this MVP.
 - The local fallback translator is deterministic so repeated validation runs stay stable.
 - Real model inference expects a Mistral-7B-Instruct-compatible adapter layout in each adapter folder.
+- Tinker setup uses `TINKER_API_KEY`, not a custom base URL.

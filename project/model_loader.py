@@ -10,6 +10,7 @@ from .config import get_adapter_path, load_config
 
 
 WORD_BOUNDARY = re.compile(r"(\W+)")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 class TranslationBackend:
@@ -156,24 +157,24 @@ class HuggingFaceTranslationBackend(TranslationBackend):
         self._model.eval()
 
     def generate(self, prompt: str, source_text: str, target_lang: str) -> str:
-        messages = [{"role": "user", "content": prompt}]
         tokenizer = self._tokenizer
         model = self._model
-        rendered_prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = tokenizer(rendered_prompt, return_tensors="pt")
+        inputs = tokenizer(prompt, return_tensors="pt")
         inputs = {key: value.to(self._device) for key, value in inputs.items()}
+        generation_config = self._generation_config(source_text=source_text)
         with self._torch.no_grad():
             output_tokens = model.generate(
                 **inputs,
-                max_new_tokens=256,
+                max_new_tokens=generation_config["max_new_tokens"],
                 do_sample=False,
                 temperature=0.0,
+                repetition_penalty=generation_config["repetition_penalty"],
+                no_repeat_ngram_size=generation_config["no_repeat_ngram_size"],
                 pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
             )
         decoded = tokenizer.decode(output_tokens[0][inputs["input_ids"].shape[-1] :], skip_special_tokens=True)
-        return decoded.strip()
+        return self._cleanup_generated_text(decoded=decoded, source_text=source_text)
 
     @staticmethod
     def _select_device(torch):
@@ -190,6 +191,34 @@ class HuggingFaceTranslationBackend(TranslationBackend):
         if device.type == "mps":
             return torch.float16
         return torch.float32
+
+    def _generation_config(self, source_text: str) -> dict[str, float | int]:
+        source_words = max(1, len(source_text.split()))
+        if self.mode == "bible":
+            return {
+                "max_new_tokens": min(96, max(24, int(source_words * 2.2))),
+                "repetition_penalty": 1.18,
+                "no_repeat_ngram_size": 4,
+            }
+        return {
+            "max_new_tokens": min(192, max(48, int(source_words * 2.8))),
+            "repetition_penalty": 1.1,
+            "no_repeat_ngram_size": 5,
+        }
+
+    def _cleanup_generated_text(self, decoded: str, source_text: str) -> str:
+        text = re.sub(r"\s+", " ", decoded).strip()
+        text = re.sub(r"^(Output:\s*)", "", text, flags=re.IGNORECASE)
+        text = re.split(r"\n\s*\n", text, maxsplit=1)[0].strip()
+
+        if self.mode == "bible":
+            text = _dedupe_adjacent_sentences(text)
+            source_sentence_count = _sentence_count(source_text)
+            if source_sentence_count:
+                text = _limit_sentences(text, source_sentence_count)
+            elif len(source_text.split()) <= 12:
+                text = _limit_sentences(text, 1)
+        return text.strip()
 
 
 def _has_real_adapter_weights(adapter_path: Path) -> bool:
@@ -211,12 +240,20 @@ def load_model(mode: str) -> LoadedModel:
     adapter_path.mkdir(parents=True, exist_ok=True)
 
     if _has_real_adapter_weights(adapter_path):
-        backend: TranslationBackend = HuggingFaceTranslationBackend(
-            mode=mode,
-            adapter_path=adapter_path,
-            base_model_name=config.base_model_name,
-        )
-        backend_name = "huggingface+peft"
+        try:
+            backend = HuggingFaceTranslationBackend(
+                mode=mode,
+                adapter_path=adapter_path,
+                base_model_name=config.base_model_name,
+            )
+        except RuntimeError as exc:
+            if "transformers, peft, and torch are required" not in str(exc):
+                raise
+            manifest = _load_manifest(adapter_path)
+            backend = MockTranslationBackend(mode=manifest.get("mode", mode))
+            backend_name = "mock"
+        else:
+            backend_name = "huggingface+peft"
     else:
         manifest = _load_manifest(adapter_path)
         backend = MockTranslationBackend(mode=manifest.get("mode", mode))
@@ -229,3 +266,32 @@ def load_model(mode: str) -> LoadedModel:
         adapter_path=adapter_path,
         backend=backend,
     )
+
+
+def _dedupe_adjacent_sentences(text: str) -> str:
+    sentences = [sentence.strip() for sentence in SENTENCE_SPLIT_RE.split(text) if sentence.strip()]
+    if not sentences:
+        return text
+
+    deduped: list[str] = []
+    previous_normalized = ""
+    for sentence in sentences:
+        normalized = sentence.casefold()
+        if normalized == previous_normalized:
+            continue
+        deduped.append(sentence)
+        previous_normalized = normalized
+    return " ".join(deduped)
+
+
+def _sentence_count(text: str) -> int:
+    return len(re.findall(r"[.!?](?:\s|$)", text))
+
+
+def _limit_sentences(text: str, count: int) -> str:
+    if count <= 0:
+        return text
+    sentences = [sentence.strip() for sentence in SENTENCE_SPLIT_RE.split(text) if sentence.strip()]
+    if not sentences:
+        return text
+    return " ".join(sentences[:count])

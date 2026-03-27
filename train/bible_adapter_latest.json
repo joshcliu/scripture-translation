@@ -1,7 +1,7 @@
 {
-  "dataset_path": "/Users/joshua/Documents/GitHub/scripture-translation/data/processed/john_es.jsonl",
+  "dataset_path": "/Users/joshua/Documents/GitHub/scripture-translation/data/processed/nt_es_full.jsonl",
   "adapter_name": "bible_adapter",
-  "job_id": "77c7ec1c-da8e-5d1e-a488-ae6cf6126b29:train:0_sampler_weights_bible_adapter_final",
+  "job_id": "88c007ef-5c01-50eb-91d1-1d8fcf5fdb8a:train:0_sampler_weights_bible_adapter_final",
   "status": "completed",
   "adapter_path": "/Users/joshua/Documents/GitHub/scripture-translation/models/adapters/bible_adapter"
 }

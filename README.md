@@ -13,6 +13,7 @@ The MVP keeps Bible and ministry translation fully separated through distinct ad
 ## What Is Included
 
 - modular data loading for JSON, JSONL, text, and extracted PDF text exports
+- Recovery Version Bible scraping into verse-level JSON from `text.recoveryversion.bible`
 - Bible verse alignment by verse id
 - ministry paragraph alignment by paragraph order
 - cleaning and JSONL conversion for instruction-style fine-tuning
@@ -24,12 +25,21 @@ The MVP keeps Bible and ministry translation fully separated through distinct ad
 
 ## Quick Start
 
+Scrape raw Recovery Version Bible text into verse JSON:
+
+```bash
+python3 scripts/scrape_recovery_version.py \
+  --book John \
+  --chapters 1-3 \
+  --output data/raw/recovery_version_john_en.json
+```
+
 Prepare Bible training data:
 
 ```bash
 python3 scripts/prepare_data.py \
   --mode bible \
-  --source data/raw/bible_john_en.json \
+  --source data/raw/recovery_version_john_en.json \
   --target data/raw/bible_john_es.json \
   --lang Spanish \
   --output data/processed/bible_john_es.jsonl
@@ -84,3 +94,4 @@ python3 scripts/validate_mvp.py
 - The local fallback translator is deterministic so repeated validation runs stay stable.
 - Real model inference expects a Mistral-7B-Instruct-compatible adapter layout in each adapter folder.
 - Tinker setup uses `TINKER_API_KEY`, not a custom base URL.
+- Use the Recovery Version scraper only where you have authorization to download and process the text.

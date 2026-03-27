@@ -2,18 +2,166 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import ssl
 import time
 from dataclasses import asdict, dataclass
 from html import unescape
 from pathlib import Path
 from typing import Callable
-from urllib import parse, request
+from urllib import error, parse, request
 
 
 BASE_URL = "https://text.recoveryversion.bible/"
+DEFAULT_CHAPTER_DELAY_SECONDS = 1.5
+DEFAULT_BOOK_DELAY_SECONDS = 3.0
+DEFAULT_TIMEOUT_SECONDS = 60
+DEFAULT_MAX_RETRIES = 4
+DEFAULT_RETRY_BACKOFF_SECONDS = 5.0
 DEFAULT_HEADERS = {
     "User-Agent": "scripture-translation-mvp/0.1 (+authorized-use)",
 }
+
+BOOK_ALIASES = {
+    "genesis": ["genesis", "gen"],
+    "exodus": ["exodus", "exo"],
+    "leviticus": ["leviticus", "lev"],
+    "numbers": ["numbers", "num"],
+    "deuteronomy": ["deuteronomy", "deut"],
+    "joshua": ["joshua", "josh"],
+    "judges": ["judges", "judg"],
+    "ruth": ["ruth"],
+    "1samuel": ["1samuel", "1sam"],
+    "2samuel": ["2samuel", "2sam"],
+    "1kings": ["1kings"],
+    "2kings": ["2kings"],
+    "1chronicles": ["1chronicles", "1chron"],
+    "2chronicles": ["2chronicles", "2chron"],
+    "ezra": ["ezra"],
+    "nehemiah": ["nehemiah", "neh"],
+    "esther": ["esther", "esth"],
+    "job": ["job"],
+    "psalms": ["psalms", "psalm", "psa"],
+    "proverbs": ["proverbs", "prov"],
+    "ecclesiastes": ["ecclesiastes", "eccl"],
+    "songofsongs": ["songofsongs", "songofsongs", "ss"],
+    "isaiah": ["isaiah", "isa"],
+    "jeremiah": ["jeremiah", "jer"],
+    "lamentations": ["lamentations", "lam"],
+    "ezekiel": ["ezekiel", "ezek"],
+    "daniel": ["daniel", "dan"],
+    "hosea": ["hosea"],
+    "joel": ["joel"],
+    "amos": ["amos"],
+    "obadiah": ["obadiah", "obad"],
+    "jonah": ["jonah"],
+    "micah": ["micah"],
+    "nahum": ["nahum"],
+    "habakkuk": ["habakkuk", "hab"],
+    "zephaniah": ["zephaniah", "zeph"],
+    "haggai": ["haggai", "hag"],
+    "zechariah": ["zechariah", "zech"],
+    "malachi": ["malachi", "mal"],
+    "matthew": ["matthew", "matt"],
+    "mark": ["mark"],
+    "luke": ["luke"],
+    "john": ["john"],
+    "acts": ["acts"],
+    "romans": ["romans", "rom"],
+    "1corinthians": ["1corinthians", "1cor"],
+    "2corinthians": ["2corinthians", "2cor"],
+    "galatians": ["galatians", "gal"],
+    "ephesians": ["ephesians", "eph"],
+    "philippians": ["philippians", "phil"],
+    "colossians": ["colossians", "col"],
+    "1thessalonians": ["1thessalonians", "1thes"],
+    "2thessalonians": ["2thessalonians", "2thes"],
+    "1timothy": ["1timothy", "1tim"],
+    "2timothy": ["2timothy", "2tim"],
+    "titus": ["titus"],
+    "philemon": ["philemon", "philem"],
+    "hebrews": ["hebrews", "heb"],
+    "james": ["james"],
+    "1peter": ["1peter", "1pet"],
+    "2peter": ["2peter", "2pet"],
+    "1john": ["1john"],
+    "2john": ["2john"],
+    "3john": ["3john"],
+    "jude": ["jude"],
+    "revelation": ["revelation", "rev"],
+}
+
+OLD_TESTAMENT_BOOKS = [
+    "Genesis",
+    "Exodus",
+    "Leviticus",
+    "Numbers",
+    "Deuteronomy",
+    "Joshua",
+    "Judges",
+    "Ruth",
+    "1Samuel",
+    "2Samuel",
+    "1Kings",
+    "2Kings",
+    "1Chronicles",
+    "2Chronicles",
+    "Ezra",
+    "Nehemiah",
+    "Esther",
+    "Job",
+    "Psalms",
+    "Proverbs",
+    "Ecclesiastes",
+    "SongofSongs",
+    "Isaiah",
+    "Jeremiah",
+    "Lamentations",
+    "Ezekiel",
+    "Daniel",
+    "Hosea",
+    "Joel",
+    "Amos",
+    "Obadiah",
+    "Jonah",
+    "Micah",
+    "Nahum",
+    "Habakkuk",
+    "Zephaniah",
+    "Haggai",
+    "Zechariah",
+    "Malachi",
+]
+
+NEW_TESTAMENT_BOOKS = [
+    "Matthew",
+    "Mark",
+    "Luke",
+    "John",
+    "Acts",
+    "Romans",
+    "1Corinthians",
+    "2Corinthians",
+    "Galatians",
+    "Ephesians",
+    "Philippians",
+    "Colossians",
+    "1Thessalonians",
+    "2Thessalonians",
+    "1Timothy",
+    "2Timothy",
+    "Titus",
+    "Philemon",
+    "Hebrews",
+    "James",
+    "1Peter",
+    "2Peter",
+    "1John",
+    "2John",
+    "3John",
+    "Jude",
+    "Revelation",
+]
 
 INDEX_LINK_RE = re.compile(r'<a[^>]+href="(?P<href>\d{2}_[^"]+_1\.htm)"[^>]*>(?P<label>.*?)</a>', re.IGNORECASE)
 CHAPTER_LINK_RE = re.compile(r'<a href="(?P<href>\d{2}_[^"]+_(?P<chapter>\d+)\.htm)">\d+</a>', re.IGNORECASE)
@@ -39,10 +187,42 @@ class VerseRecord:
 Fetcher = Callable[[str], str]
 
 
-def fetch_text(url: str, timeout: int = 30) -> str:
-    req = request.Request(url, headers=DEFAULT_HEADERS)
-    with request.urlopen(req, timeout=timeout) as response:
-        return response.read().decode("utf-8")
+def build_fetcher(
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
+) -> Fetcher:
+    def fetcher(url: str) -> str:
+        return fetch_text(
+            url=url,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
+
+    return fetcher
+
+
+def fetch_text(
+    url: str,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
+) -> str:
+    attempts = max(1, max_retries)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        req = request.Request(url, headers=DEFAULT_HEADERS)
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                return response.read().decode("utf-8")
+        except (TimeoutError, socket.timeout, ssl.SSLError, error.URLError) as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            time.sleep(retry_backoff_seconds * attempt)
+    assert last_error is not None
+    raise RuntimeError(f"Failed to fetch {url} after {attempts} attempts: {last_error}") from last_error
 
 
 def normalize_book_name(book: str) -> str:
@@ -65,8 +245,9 @@ def get_book_index(fetcher: Fetcher = fetch_text, base_url: str = BASE_URL) -> d
 
 def discover_chapter_urls(book: str, fetcher: Fetcher = fetch_text, base_url: str = BASE_URL) -> list[str]:
     book_links = get_book_index(fetcher=fetcher, base_url=base_url)
+    book_key = _resolve_book_key(book, book_links)
     try:
-        first_chapter_url = book_links[normalize_book_name(book)]
+        first_chapter_url = book_links[book_key]
     except KeyError as exc:
         supported = ", ".join(sorted(book_links))
         raise ValueError(f"Unknown book '{book}'. Available normalized book keys include: {supported}") from exc
@@ -85,7 +266,7 @@ def scrape_book(
     chapters: list[int] | None = None,
     fetcher: Fetcher = fetch_text,
     base_url: str = BASE_URL,
-    delay_seconds: float = 0.0,
+    delay_seconds: float = DEFAULT_CHAPTER_DELAY_SECONDS,
 ) -> Path:
     chapter_urls = discover_chapter_urls(book=book, fetcher=fetcher, base_url=base_url)
     if chapters is not None:
@@ -106,6 +287,40 @@ def scrape_book(
     with output.open("w", encoding="utf-8") as handle:
         json.dump([asdict(verse) for verse in verses], handle, ensure_ascii=False, indent=2)
     return output
+
+
+def scrape_books(
+    books: list[str],
+    output_dir: str | Path,
+    fetcher: Fetcher = fetch_text,
+    base_url: str = BASE_URL,
+    chapter_delay_seconds: float = DEFAULT_CHAPTER_DELAY_SECONDS,
+    book_delay_seconds: float = DEFAULT_BOOK_DELAY_SECONDS,
+    skip_existing: bool = True,
+) -> list[Path]:
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    written_paths: list[Path] = []
+    for index, book in enumerate(books):
+        output_path = output_root / f"recovery_version_{_slugify_book_name(book)}_en.json"
+        if skip_existing and output_path.exists():
+            written_paths.append(output_path)
+            print(f"Skipping existing {output_path}")
+            continue
+        print(f"Scraping {book} -> {output_path}")
+        written_paths.append(
+            scrape_book(
+                book=book,
+                output_path=output_path,
+                fetcher=fetcher,
+                base_url=base_url,
+                delay_seconds=chapter_delay_seconds,
+            )
+        )
+        if book_delay_seconds and index < len(books) - 1:
+            time.sleep(book_delay_seconds)
+    return written_paths
 
 
 def parse_chapter_page(html: str, source_url: str) -> list[VerseRecord]:
@@ -163,6 +378,31 @@ def _chapter_from_url(url: str) -> int:
     if match is None:
         raise ValueError(f"Could not parse chapter from URL '{url}'")
     return int(match.group(1))
+
+
+def _slugify_book_name(book: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", book.lower()).strip("_")
+
+
+def _resolve_book_key(book: str, book_links: dict[str, str]) -> str:
+    normalized = normalize_book_name(book)
+    if normalized in book_links:
+        return normalized
+
+    aliases = BOOK_ALIASES.get(normalized, [])
+    for alias in aliases:
+        alias_key = normalize_book_name(alias)
+        if alias_key in book_links:
+            return alias_key
+
+    for canonical, alias_values in BOOK_ALIASES.items():
+        if normalized == canonical:
+            continue
+        if normalized in {normalize_book_name(value) for value in alias_values} and canonical in book_links:
+            return canonical
+
+    raise KeyError(normalized)
+
 
 
 def _clean_text(raw_html: str) -> str:

@@ -34,6 +34,23 @@ python3 scripts/scrape_recovery_version.py \
   --output data/raw/recovery_version_john_en.json
 ```
 
+Scrape the whole New Testament:
+
+```bash
+python3 scripts/scrape_new_testament.py --output-dir data/raw/nt
+```
+
+Scrape the whole Old Testament:
+
+```bash
+python3 scripts/scrape_old_testament.py --output-dir data/raw/ot
+```
+
+These bulk scripts use slower default pacing:
+
+- `1.5` seconds between chapter requests
+- `3.0` seconds between books
+
 Prepare Bible training data:
 
 ```bash

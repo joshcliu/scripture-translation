@@ -1,5 +1,5 @@
 {
-  "base_model_name": "mistralai/Mistral-7B-Instruct-v0.2",
+  "base_model_name": "Qwen/Qwen3-4B-Instruct-2507",
   "default_target_lang": "es",
   "adapter_paths": {
     "bible": "models/adapters/bible_adapter",

@@ -1,0 +1,5 @@
+{
+  "job_id": "77c7ec1c-da8e-5d1e-a488-ae6cf6126b29:train:0_sampler_weights_bible_adapter_final",
+  "checkpoint_path": "tinker://77c7ec1c-da8e-5d1e-a488-ae6cf6126b29:train:0/sampler_weights/bible_adapter_final",
+  "base_model_name": "Qwen/Qwen3-4B-Instruct-2507"
+}

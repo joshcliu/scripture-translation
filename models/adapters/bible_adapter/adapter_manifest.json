@@ -1,7 +1,8 @@
 {
   "adapter_name": "bible_adapter",
   "mode": "bible",
-  "job_id": "mock-job:bible_adapter",
-  "backend": "mock",
-  "status": "ready"
+  "job_id": "77c7ec1c-da8e-5d1e-a488-ae6cf6126b29:train:0_sampler_weights_bible_adapter_final",
+  "backend": "tinker",
+  "status": "ready",
+  "checkpoint_path": "tinker://77c7ec1c-da8e-5d1e-a488-ae6cf6126b29:train:0/sampler_weights/bible_adapter_final"
 }

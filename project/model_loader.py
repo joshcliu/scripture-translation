@@ -144,13 +144,16 @@ class HuggingFaceTranslationBackend(TranslationBackend):
 
         self.mode = mode
         self._torch = torch
+        self._device = self._select_device(torch)
         self._tokenizer = AutoTokenizer.from_pretrained(base_model_name)
         base_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
+            torch_dtype=self._select_dtype(torch, self._device),
+            low_cpu_mem_usage=True,
         )
         self._model = PeftModel.from_pretrained(base_model, str(adapter_path))
+        self._model.to(self._device)
+        self._model.eval()
 
     def generate(self, prompt: str, source_text: str, target_lang: str) -> str:
         messages = [{"role": "user", "content": prompt}]
@@ -160,8 +163,7 @@ class HuggingFaceTranslationBackend(TranslationBackend):
             messages, tokenize=False, add_generation_prompt=True
         )
         inputs = tokenizer(rendered_prompt, return_tensors="pt")
-        if hasattr(model, "device"):
-            inputs = {key: value.to(model.device) for key, value in inputs.items()}
+        inputs = {key: value.to(self._device) for key, value in inputs.items()}
         with self._torch.no_grad():
             output_tokens = model.generate(
                 **inputs,
@@ -172,6 +174,22 @@ class HuggingFaceTranslationBackend(TranslationBackend):
             )
         decoded = tokenizer.decode(output_tokens[0][inputs["input_ids"].shape[-1] :], skip_special_tokens=True)
         return decoded.strip()
+
+    @staticmethod
+    def _select_device(torch):
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    @staticmethod
+    def _select_dtype(torch, device):
+        if device.type == "cuda":
+            return torch.float16
+        if device.type == "mps":
+            return torch.float16
+        return torch.float32
 
 
 def _has_real_adapter_weights(adapter_path: Path) -> bool:

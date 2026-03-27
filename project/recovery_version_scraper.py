@@ -12,7 +12,9 @@ from typing import Callable
 from urllib import error, parse, request
 
 
-BASE_URL = "https://text.recoveryversion.bible/"
+ENGLISH_BASE_URL = "https://text.recoveryversion.bible/"
+SPANISH_BASE_URL = "https://texto.versionrecobro.org/"
+BASE_URL = ENGLISH_BASE_URL
 DEFAULT_CHAPTER_DELAY_SECONDS = 1.5
 DEFAULT_BOOK_DELAY_SECONDS = 3.0
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -20,6 +22,10 @@ DEFAULT_MAX_RETRIES = 4
 DEFAULT_RETRY_BACKOFF_SECONDS = 5.0
 DEFAULT_HEADERS = {
     "User-Agent": "scripture-translation-mvp/0.1 (+authorized-use)",
+}
+SITE_BASE_URLS = {
+    "en": ENGLISH_BASE_URL,
+    "es": SPANISH_BASE_URL,
 }
 
 BOOK_ALIASES = {
@@ -165,7 +171,10 @@ NEW_TESTAMENT_BOOKS = [
 
 INDEX_LINK_RE = re.compile(r'<a[^>]+href="(?P<href>\d{2}_[^"]+_1\.htm)"[^>]*>(?P<label>.*?)</a>', re.IGNORECASE)
 CHAPTER_LINK_RE = re.compile(r'<a href="(?P<href>\d{2}_[^"]+_(?P<chapter>\d+)\.htm)">\d+</a>', re.IGNORECASE)
-TITLE_RE = re.compile(r"<title>\s*(?P<title>.*?)\s+Recovery Version\s*</title>", re.IGNORECASE | re.DOTALL)
+TITLE_RE = re.compile(
+    r"<title>\s*(?P<title>.*?)\s+(?:Recovery Version|Versi[oó]n Recobro)\s*</title>",
+    re.IGNORECASE | re.DOTALL,
+)
 VERSE_RE = re.compile(
     r'<p[^>]+id="(?P<anchor>[A-Za-z0-9]+?(?P<chapter>\d+)-(?P<verse>\d+))"[^>]*class="verse"[^>]*>(?P<body>.*?)</p>',
     re.IGNORECASE | re.DOTALL,
@@ -229,15 +238,27 @@ def normalize_book_name(book: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", book.lower())
 
 
+def get_site_base_url(site: str) -> str:
+    try:
+        return SITE_BASE_URLS[site]
+    except KeyError as exc:
+        supported = ", ".join(sorted(SITE_BASE_URLS))
+        raise ValueError(f"Unsupported site '{site}'. Expected one of: {supported}") from exc
+
+
 def get_book_index(fetcher: Fetcher = fetch_text, base_url: str = BASE_URL) -> dict[str, str]:
     html = fetcher(base_url)
     mapping: dict[str, str] = {}
     for match in INDEX_LINK_RE.finditer(html):
         label = _clean_text(match.group("label"))
         href = match.group("href")
+        url = parse.urljoin(base_url, href)
         if not label:
             continue
-        mapping[normalize_book_name(label)] = parse.urljoin(base_url, href)
+        mapping[normalize_book_name(label)] = url
+        url_book_key = _book_key_from_href(href)
+        if url_book_key:
+            mapping[url_book_key] = url
     if not mapping:
         raise RuntimeError("Could not find any book links on the Recovery Version index page.")
     return mapping
@@ -267,6 +288,7 @@ def scrape_book(
     fetcher: Fetcher = fetch_text,
     base_url: str = BASE_URL,
     delay_seconds: float = DEFAULT_CHAPTER_DELAY_SECONDS,
+    language_code: str = "en",
 ) -> Path:
     chapter_urls = discover_chapter_urls(book=book, fetcher=fetcher, base_url=base_url)
     if chapters is not None:
@@ -278,7 +300,7 @@ def scrape_book(
     verses: list[VerseRecord] = []
     for index, chapter_url in enumerate(chapter_urls):
         html = fetcher(chapter_url)
-        verses.extend(parse_chapter_page(html, chapter_url))
+        verses.extend(parse_chapter_page(html, chapter_url, canonical_book=book))
         if delay_seconds and index < len(chapter_urls) - 1:
             time.sleep(delay_seconds)
 
@@ -297,13 +319,14 @@ def scrape_books(
     chapter_delay_seconds: float = DEFAULT_CHAPTER_DELAY_SECONDS,
     book_delay_seconds: float = DEFAULT_BOOK_DELAY_SECONDS,
     skip_existing: bool = True,
+    language_code: str = "en",
 ) -> list[Path]:
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
     written_paths: list[Path] = []
     for index, book in enumerate(books):
-        output_path = output_root / f"recovery_version_{_slugify_book_name(book)}_en.json"
+        output_path = output_root / f"recovery_version_{_slugify_book_name(book)}_{language_code}.json"
         if skip_existing and output_path.exists():
             written_paths.append(output_path)
             print(f"Skipping existing {output_path}")
@@ -316,6 +339,7 @@ def scrape_books(
                 fetcher=fetcher,
                 base_url=base_url,
                 delay_seconds=chapter_delay_seconds,
+                language_code=language_code,
             )
         )
         if book_delay_seconds and index < len(books) - 1:
@@ -323,11 +347,12 @@ def scrape_books(
     return written_paths
 
 
-def parse_chapter_page(html: str, source_url: str) -> list[VerseRecord]:
+def parse_chapter_page(html: str, source_url: str, canonical_book: str | None = None) -> list[VerseRecord]:
     title_match = TITLE_RE.search(html)
-    if title_match is None:
+    if title_match is None and canonical_book is None:
         raise RuntimeError(f"Could not determine book title from {source_url}")
-    book = _clean_text(title_match.group("title"))
+    book = _clean_text(title_match.group("title")) if title_match is not None else canonical_book or ""
+    canonical_slug = _slugify_book_name(canonical_book or book)
     verses: list[VerseRecord] = []
 
     for match in VERSE_RE.finditer(html):
@@ -338,7 +363,7 @@ def parse_chapter_page(html: str, source_url: str) -> list[VerseRecord]:
         text = _clean_text(body)
         verses.append(
             VerseRecord(
-                id=f"{book.lower().replace(' ', '_')}_{chapter}_{verse}",
+                id=f"{canonical_slug}_{chapter}_{verse}",
                 book=book,
                 chapter=chapter,
                 verse=verse,
@@ -378,6 +403,13 @@ def _chapter_from_url(url: str) -> int:
     if match is None:
         raise ValueError(f"Could not parse chapter from URL '{url}'")
     return int(match.group(1))
+
+
+def _book_key_from_href(href: str) -> str | None:
+    match = re.search(r"^\d{2}_(?P<book>[^_]+)_(?:\d+|o)\.htm$", href)
+    if match is None:
+        return None
+    return normalize_book_name(match.group("book"))
 
 
 def _slugify_book_name(book: str) -> str:

@@ -8,9 +8,8 @@ from pathlib import Path
 from project.recovery_version_scraper import (
     NEW_TESTAMENT_BOOKS,
     OLD_TESTAMENT_BOOKS,
-    build_fetcher,
     discover_chapter_urls,
-    fetch_text,
+    get_site_base_url,
     parse_chapter_page,
     parse_chapter_selection,
     scrape_book,
@@ -68,6 +67,20 @@ LUKE_1_HTML = """
 </html>
 """
 
+SPANISH_JOHN_1_HTML = """
+<html>
+<head><title>Juan Versión Recobro</title></head>
+<body>
+<div class="chapter-links">
+<a href="43_John_1.htm">1</a>
+</div>
+<section id="verses">
+<p id="Joh1-1" class="verse"><b><a href="43_John_1.htm">Juan 1</a><a href="43_John_1.htm">:1</a> </b>En el principio era la Palabra.</p>
+</section>
+</body>
+</html>
+"""
+
 
 class RecoveryVersionScraperTests(unittest.TestCase):
     def test_parse_chapter_page_extracts_verse_records(self) -> None:
@@ -75,6 +88,16 @@ class RecoveryVersionScraperTests(unittest.TestCase):
         self.assertEqual(len(verses), 2)
         self.assertEqual(verses[0].id, "john_1_1")
         self.assertEqual(verses[0].text, "In the beginning was the Word.")
+
+    def test_parse_chapter_page_keeps_canonical_ids_for_spanish_pages(self) -> None:
+        verses = parse_chapter_page(
+            SPANISH_JOHN_1_HTML,
+            "https://texto.versionrecobro.org/43_John_1.htm",
+            canonical_book="John",
+        )
+        self.assertEqual(len(verses), 1)
+        self.assertEqual(verses[0].id, "john_1_1")
+        self.assertEqual(verses[0].book, "Juan")
 
     def test_discover_chapter_urls_reads_book_index_and_chapters(self) -> None:
         responses = {
@@ -135,6 +158,28 @@ class RecoveryVersionScraperTests(unittest.TestCase):
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(len(payload), 3)
             self.assertEqual(payload[2]["id"], "john_2_1")
+
+    def test_scrape_book_can_write_spanish_language_suffix(self) -> None:
+        responses = {
+            "https://texto.versionrecobro.org/": '<html><body><a class="gospels" href="43_John_1.htm">Juan</a></body></html>',
+            "https://texto.versionrecobro.org/43_John_1.htm": SPANISH_JOHN_1_HTML,
+        }
+
+        def fetcher(url: str) -> str:
+            return responses[url]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "recovery_version_john_es.json"
+            scrape_book(
+                "John",
+                output_path=output_path,
+                fetcher=fetcher,
+                base_url=get_site_base_url("es"),
+                language_code="es",
+            )
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload[0]["id"], "john_1_1")
+            self.assertEqual(payload[0]["book"], "Juan")
 
     def test_parse_chapter_selection_supports_ranges(self) -> None:
         self.assertEqual(parse_chapter_selection("1,3,5-7"), [1, 3, 5, 6, 7])

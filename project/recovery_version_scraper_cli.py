@@ -8,6 +8,7 @@ from .recovery_version_scraper import (
     DEFAULT_RETRY_BACKOFF_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
     build_fetcher,
+    get_site_base_url,
     parse_chapter_selection,
     scrape_book,
 )
@@ -16,6 +17,12 @@ from .recovery_version_scraper import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Scrape verse text from text.recoveryversion.bible")
     parser.add_argument("--book", required=True, help="Book name, for example John")
+    parser.add_argument(
+        "--site",
+        choices=["en", "es"],
+        default="en",
+        help="Which Recovery Version text site to scrape",
+    )
     parser.add_argument(
         "--chapters",
         help="Optional chapter selection, for example '1', '1-3', or '1,3,5-7'",
@@ -56,7 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         chapters=chapters,
         output_path=args.output,
         fetcher=fetcher,
+        base_url=get_site_base_url(args.site),
         delay_seconds=args.delay,
+        language_code=args.site,
     )
     print(output_path)
     return 0

@@ -11,12 +11,13 @@ from .recovery_version_scraper import (
     NEW_TESTAMENT_BOOKS,
     OLD_TESTAMENT_BOOKS,
     build_fetcher,
+    get_site_base_url,
     scrape_books,
 )
 
 
-def build_parser(testament: str) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=f"Scrape the {testament.upper()} from text.recoveryversion.bible")
+def build_parser(testament: str, site: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=f"Scrape the {testament.upper()} from the {site} Recovery Version site")
     parser.add_argument("--output-dir", required=True, help="Directory to write book JSON files into")
     parser.add_argument(
         "--chapter-delay",
@@ -57,8 +58,8 @@ def build_parser(testament: str) -> argparse.ArgumentParser:
     return parser
 
 
-def main(testament: str, argv: list[str] | None = None) -> int:
-    args = build_parser(testament).parse_args(argv)
+def main(testament: str, site: str = "en", argv: list[str] | None = None) -> int:
+    args = build_parser(testament, site).parse_args(argv)
     books = NEW_TESTAMENT_BOOKS if testament == "nt" else OLD_TESTAMENT_BOOKS
     fetcher = build_fetcher(
         timeout=args.timeout,
@@ -69,9 +70,11 @@ def main(testament: str, argv: list[str] | None = None) -> int:
         books=books,
         output_dir=args.output_dir,
         fetcher=fetcher,
+        base_url=get_site_base_url(site),
         chapter_delay_seconds=args.chapter_delay,
         book_delay_seconds=args.book_delay,
         skip_existing=args.skip_existing,
+        language_code=site,
     )
     for path in paths:
         print(path)

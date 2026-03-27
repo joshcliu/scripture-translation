@@ -13,7 +13,7 @@ The MVP keeps Bible and ministry translation fully separated through distinct ad
 ## What Is Included
 
 - modular data loading for JSON, JSONL, text, and extracted PDF text exports
-- Recovery Version Bible scraping into verse-level JSON from `text.recoveryversion.bible`
+- Recovery Version Bible scraping into verse-level JSON from the official English and Spanish text-only sites
 - Bible verse alignment by verse id
 - ministry paragraph alignment by paragraph order
 - cleaning and JSONL conversion for instruction-style fine-tuning
@@ -34,16 +34,37 @@ python3 scripts/scrape_recovery_version.py \
   --output data/raw/recovery_version_john_en.json
 ```
 
+Scrape raw Spanish Recovery Version Bible text into verse JSON with matching verse ids:
+
+```bash
+python3 scripts/scrape_spanish_recovery_version.py \
+  --book John \
+  --chapters 1-3 \
+  --output data/raw/recovery_version_john_es.json
+```
+
 Scrape the whole New Testament:
 
 ```bash
 python3 scripts/scrape_new_testament.py --output-dir data/raw/nt
 ```
 
+Scrape the whole Spanish New Testament:
+
+```bash
+python3 scripts/scrape_spanish_new_testament.py --output-dir data/raw/nt_es
+```
+
 Scrape the whole Old Testament:
 
 ```bash
 python3 scripts/scrape_old_testament.py --output-dir data/raw/ot
+```
+
+Scrape the whole Spanish Old Testament:
+
+```bash
+python3 scripts/scrape_spanish_old_testament.py --output-dir data/raw/ot_es
 ```
 
 These bulk scripts use slower default pacing:
@@ -57,7 +78,7 @@ Prepare Bible training data:
 python3 scripts/prepare_data.py \
   --mode bible \
   --source data/raw/recovery_version_john_en.json \
-  --target data/raw/bible_john_es.json \
+  --target data/raw/recovery_version_john_es.json \
   --lang Spanish \
   --output data/processed/bible_john_es.jsonl
 ```
